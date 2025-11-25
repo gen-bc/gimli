@@ -310,7 +310,8 @@ mod convert {
     use super::*;
 
     use crate::read::{self, Reader};
-    use crate::write::{ConvertError, ConvertResult, ConvertUnitContext};
+    use crate::write::remapper::AddressRemapper;
+    use crate::write::{ConvertResult, ConvertUnitContext};
 
     impl LocationList {
         /// Create a location list by reading the data from the give location list iter.
@@ -319,8 +320,6 @@ mod convert {
             context: &ConvertUnitContext<'_, R>,
         ) -> ConvertResult<Self> {
             let mut have_base_address = context.base_address != Address::Constant(0);
-            let convert_address =
-                |x| (context.convert_address)(x).ok_or(ConvertError::InvalidAddress);
             let convert_expression = |x| {
                 Expression::from(
                     x,
@@ -331,49 +330,40 @@ mod convert {
                     context.convert_address,
                 )
             };
+            let get_unit_addr = |x| context.dwarf.address(context.unit, x);
             let mut loc_list = Vec::new();
+            let mut remapper = AddressRemapper::new(context.convert_address, "LocationList");
             while let Some(from_loc) = from.next()? {
                 let loc = match from_loc {
                     read::RawLocListEntry::AddressOrOffsetPair { begin, end, data } => {
-                        // These were parsed as addresses, even if they are offsets.
-                        let begin = convert_address(begin)?;
-                        let end = convert_address(end)?;
                         let data = convert_expression(data)?;
-                        match (begin, end) {
-                            (Address::Constant(begin_offset), Address::Constant(end_offset)) => {
-                                if have_base_address {
-                                    Location::OffsetPair {
-                                        begin: begin_offset,
-                                        end: end_offset,
-                                        data,
-                                    }
-                                } else {
-                                    Location::StartEnd { begin, end, data }
-                                }
-                            }
-                            _ => {
-                                if have_base_address {
-                                    // At least one of begin/end is an address, but we also have
-                                    // a base address. Adding addresses is undefined.
-                                    return Err(ConvertError::InvalidRangeRelativeAddress);
-                                }
-                                Location::StartEnd { begin, end, data }
-                            }
+                        if have_base_address {
+                            remapper.set_cur_loc("AddressOrOffsetPair OffsetPair");
+                            let (begin, end) = remapper.remap_start_end_offsets(begin, end)?;
+                            Location::OffsetPair { begin, end, data }
+                        } else {
+                            // TODO: is this correct? Should I assume instead base address 0?
+                            remapper.set_cur_loc("AddressOrOffsetPair StartEnd");
+                            let (begin, end) = remapper.remap_start_end(begin, end)?;
+                            Location::StartEnd { begin, end, data }
                         }
                     }
                     read::RawLocListEntry::BaseAddress { addr } => {
+                        remapper.set_cur_loc("BaseAddress");
                         have_base_address = true;
-                        let address = convert_address(addr)?;
+                        let address = remapper.begin_range(addr)?;
                         Location::BaseAddress { address }
                     }
                     read::RawLocListEntry::BaseAddressx { addr } => {
+                        remapper.set_cur_loc("BaseAddressx");
                         have_base_address = true;
-                        let address = convert_address(context.dwarf.address(context.unit, addr)?)?;
+                        let address = remapper.begin_range(get_unit_addr(addr)?)?;
                         Location::BaseAddress { address }
                     }
                     read::RawLocListEntry::StartxEndx { begin, end, data } => {
-                        let begin = convert_address(context.dwarf.address(context.unit, begin)?)?;
-                        let end = convert_address(context.dwarf.address(context.unit, end)?)?;
+                        remapper.set_cur_loc("StartxEndx");
+                        let (begin, end) =
+                            remapper.remap_start_end(get_unit_addr(begin)?, get_unit_addr(end)?)?;
                         let data = convert_expression(data)?;
                         Location::StartEnd { begin, end, data }
                     }
@@ -382,7 +372,9 @@ mod convert {
                         length,
                         data,
                     } => {
-                        let begin = convert_address(context.dwarf.address(context.unit, begin)?)?;
+                        remapper.set_cur_loc("StartxLength");
+                        let (begin, length) =
+                            remapper.remap_start_length(get_unit_addr(begin)?, length)?;
                         let data = convert_expression(data)?;
                         Location::StartLength {
                             begin,
@@ -391,12 +383,14 @@ mod convert {
                         }
                     }
                     read::RawLocListEntry::OffsetPair { begin, end, data } => {
+                        remapper.set_cur_loc("OffsetPair");
+                        let (begin, end) = remapper.remap_start_end_offsets(begin, end)?;
                         let data = convert_expression(data)?;
                         Location::OffsetPair { begin, end, data }
                     }
                     read::RawLocListEntry::StartEnd { begin, end, data } => {
-                        let begin = convert_address(begin)?;
-                        let end = convert_address(end)?;
+                        remapper.set_cur_loc("StartEnd");
+                        let (begin, end) = remapper.remap_start_end(begin, end)?;
                         let data = convert_expression(data)?;
                         Location::StartEnd { begin, end, data }
                     }
@@ -405,7 +399,8 @@ mod convert {
                         length,
                         data,
                     } => {
-                        let begin = convert_address(begin)?;
+                        remapper.set_cur_loc("StartLength");
+                        let (begin, length) = remapper.remap_start_length(begin, length)?;
                         let data = convert_expression(data)?;
                         Location::StartLength {
                             begin,

@@ -1037,6 +1037,7 @@ define_section!(
 mod convert {
     use super::*;
     use crate::read::{self, Reader};
+    use crate::write::remapper::AddressRemapper;
     use crate::write::{self, ConvertError, ConvertResult};
 
     impl LineProgram {
@@ -1151,17 +1152,18 @@ mod convert {
             // us preserve address relocations.
             let mut from_row = read::LineRow::new(from_program.header());
             let mut instructions = from_program.header().instructions();
-            let mut address = None;
+            let mut orig_address = None;
+            let mut remap_address = None;
+            let mut remapper = AddressRemapper::new(convert_address, "LineProgram");
             while let Some(instruction) = instructions.next_instruction(from_program.header())? {
                 match instruction {
-                    read::LineInstruction::SetAddress(val) => {
+                    read::LineInstruction::SetAddress(orig_val) => {
                         if program.in_sequence() {
                             return Err(ConvertError::UnsupportedLineInstruction);
                         }
-                        match convert_address(val) {
-                            Some(val) => address = Some(val),
-                            None => return Err(ConvertError::InvalidAddress),
-                        }
+                        remapper.set_cur_loc("SetAddress");
+                        remap_address = Some(remapper.remap_address(orig_val)?);
+                        orig_address = Some(orig_val);
                         from_row
                             .execute(read::LineInstruction::SetAddress(0), &mut from_program)?;
                     }
@@ -1171,13 +1173,23 @@ mod convert {
                     _ => {
                         if from_row.execute(instruction, &mut from_program)? {
                             if !program.in_sequence() {
-                                program.begin_sequence(address);
-                                address = None;
+                                program.begin_sequence(remap_address);
+                                remapper.set_cur_loc("BeginSequence");
+                                remap_address = None;
+                                if let Some(orig_addr) = orig_address {
+                                    orig_address = None;
+                                    let _unused = remapper.begin_range(orig_addr)?;
+                                }
                             }
                             if from_row.end_sequence() {
-                                program.end_sequence(from_row.address());
+                                remapper.set_cur_loc("EndSequence");
+                                let end_offset = remapper.remap_offset(from_row.address())?;
+                                program.end_sequence(end_offset);
+                                remapper.end_range()?;
                             } else {
-                                program.row().address_offset = from_row.address();
+                                remapper.set_cur_loc("GenerateRow");
+                                program.row().address_offset =
+                                    remapper.remap_offset(from_row.address())?;
                                 program.row().op_index = from_row.op_index();
                                 program.row().file = {
                                     let file = from_row.file_index();

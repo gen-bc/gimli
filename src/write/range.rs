@@ -226,7 +226,8 @@ mod convert {
     use super::*;
 
     use crate::read::{self, Reader};
-    use crate::write::{ConvertError, ConvertResult, ConvertUnitContext};
+    use crate::write::remapper::AddressRemapper;
+    use crate::write::{ConvertResult, ConvertUnitContext};
 
     impl RangeList {
         /// Create a range list by reading the data from the give range list iter.
@@ -235,65 +236,60 @@ mod convert {
             context: &ConvertUnitContext<'_, R>,
         ) -> ConvertResult<Self> {
             let mut have_base_address = context.base_address != Address::Constant(0);
-            let convert_address =
-                |x| (context.convert_address)(x).ok_or(ConvertError::InvalidAddress);
+            let get_unit_addr = |x| context.dwarf.address(context.unit, x);
             let mut ranges = Vec::new();
+            let mut remapper = AddressRemapper::new(context.convert_address, "RangeList");
             while let Some(from_range) = from.next()? {
                 let range = match from_range {
                     read::RawRngListEntry::AddressOrOffsetPair { begin, end } => {
-                        // These were parsed as addresses, even if they are offsets.
-                        let begin = convert_address(begin)?;
-                        let end = convert_address(end)?;
-                        match (begin, end) {
-                            (Address::Constant(begin_offset), Address::Constant(end_offset)) => {
-                                if have_base_address {
-                                    Range::OffsetPair {
-                                        begin: begin_offset,
-                                        end: end_offset,
-                                    }
-                                } else {
-                                    Range::StartEnd { begin, end }
-                                }
-                            }
-                            _ => {
-                                if have_base_address {
-                                    // At least one of begin/end is an address, but we also have
-                                    // a base address. Adding addresses is undefined.
-                                    return Err(ConvertError::InvalidRangeRelativeAddress);
-                                }
-                                Range::StartEnd { begin, end }
-                            }
+                        if have_base_address {
+                            remapper.set_cur_loc("AddressOrOffsetPair OffsetPair");
+                            let (begin, end) = remapper.remap_start_end_offsets(begin, end)?;
+                            Range::OffsetPair { begin, end }
+                        } else {
+                            // TODO: is this correct? Should I assume instead base address 0?
+                            remapper.set_cur_loc("AddressOrOffsetPair StartEnd");
+                            let (begin, end) = remapper.remap_start_end(begin, end)?;
+                            Range::StartEnd { begin, end }
                         }
                     }
                     read::RawRngListEntry::BaseAddress { addr } => {
+                        remapper.set_cur_loc("BaseAddress");
                         have_base_address = true;
-                        let address = convert_address(addr)?;
+                        let address = remapper.remap_address(addr)?;
                         Range::BaseAddress { address }
                     }
                     read::RawRngListEntry::BaseAddressx { addr } => {
+                        remapper.set_cur_loc("BaseAddressx");
                         have_base_address = true;
-                        let address = convert_address(context.dwarf.address(context.unit, addr)?)?;
+                        let address = remapper.remap_address(get_unit_addr(addr)?)?;
                         Range::BaseAddress { address }
                     }
                     read::RawRngListEntry::StartxEndx { begin, end } => {
-                        let begin = convert_address(context.dwarf.address(context.unit, begin)?)?;
-                        let end = convert_address(context.dwarf.address(context.unit, end)?)?;
+                        remapper.set_cur_loc("StartxEndx");
+                        let (begin, end) =
+                            remapper.remap_start_end(get_unit_addr(begin)?, get_unit_addr(end)?)?;
                         Range::StartEnd { begin, end }
                     }
                     read::RawRngListEntry::StartxLength { begin, length } => {
-                        let begin = convert_address(context.dwarf.address(context.unit, begin)?)?;
+                        remapper.set_cur_loc("StartxLength");
+                        let (begin, length) =
+                            remapper.remap_start_length(get_unit_addr(begin)?, length)?;
                         Range::StartLength { begin, length }
                     }
                     read::RawRngListEntry::OffsetPair { begin, end } => {
+                        remapper.set_cur_loc("OffsetPair");
+                        let (begin, end) = remapper.remap_start_end_offsets(begin, end)?;
                         Range::OffsetPair { begin, end }
                     }
                     read::RawRngListEntry::StartEnd { begin, end } => {
-                        let begin = convert_address(begin)?;
-                        let end = convert_address(end)?;
+                        remapper.set_cur_loc("StartEnd");
+                        let (begin, end) = remapper.remap_start_end(begin, end)?;
                         Range::StartEnd { begin, end }
                     }
                     read::RawRngListEntry::StartLength { begin, length } => {
-                        let begin = convert_address(begin)?;
+                        remapper.set_cur_loc("StartLength");
+                        let (begin, length) = remapper.remap_start_length(begin, length)?;
                         Range::StartLength { begin, length }
                     }
                 };
