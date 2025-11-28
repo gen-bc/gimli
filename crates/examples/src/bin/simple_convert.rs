@@ -4,7 +4,7 @@
 //! convert the DWARF data into a `gimli::write::Dwarf`, and write it out to a
 //! new file.
 
-use gimli::write::Writer as _;
+use gimli::write::{remapper::Remapper, Writer as _};
 use object::{Object, ObjectSection};
 use std::{borrow, env, error, fs, io};
 
@@ -62,9 +62,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     let read_dwarf = read_dwarf_sections.borrow(|section| borrow_section(section, endian));
 
     // Read and convert the DWARF data into a `write::Dwarf`.
-    let mut write_dwarf = gimli::write::Dwarf::from(&read_dwarf, &|address| {
-        Some(gimli::write::Address::Constant(address))
-    })?;
+    let mut write_dwarf = gimli::write::Dwarf::from(&read_dwarf, &Remapper::test_remapper())?;
 
     // At this point you could modify `write_dwarf` as desired.
 

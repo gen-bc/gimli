@@ -59,16 +59,20 @@ impl FrameTable {
     }
 
     /// Write the frame table entries to the given `.debug_frame` section.
-    pub fn write_debug_frame<W: Writer>(&self, w: &mut DebugFrame<W>) -> Result<()> {
-        self.write(&mut w.0, false)
+    pub fn write_debug_frame<W: Writer>(
+        &self,
+        w: &mut DebugFrame<W>,
+        upgrade_version: bool,
+    ) -> Result<()> {
+        self.write(&mut w.0, false, upgrade_version)
     }
 
     /// Write the frame table entries to the given `.eh_frame` section.
     pub fn write_eh_frame<W: Writer>(&self, w: &mut EhFrame<W>) -> Result<()> {
-        self.write(&mut w.0, true)
+        self.write(&mut w.0, true, false)
     }
 
-    fn write<W: Writer>(&self, w: &mut W, eh_frame: bool) -> Result<()> {
+    fn write<W: Writer>(&self, w: &mut W, eh_frame: bool, upgrade_version: bool) -> Result<()> {
         let mut cie_offsets = vec![None; self.cies.len()];
         for (cie_id, fde) in &self.fdes {
             let cie_index = cie_id.index;
@@ -77,7 +81,7 @@ impl FrameTable {
                 Some(offset) => offset,
                 None => {
                     // Only write CIEs as they are referenced.
-                    let offset = cie.write(w, eh_frame)?;
+                    let offset = cie.write(w, eh_frame, upgrade_version)?;
                     cie_offsets[cie_index] = Some(offset);
                     offset
                 }
@@ -164,7 +168,7 @@ impl CommonInformationEntry {
     }
 
     /// Returns the section offset of the CIE.
-    fn write<W: Writer>(&self, w: &mut W, eh_frame: bool) -> Result<usize> {
+    fn write<W: Writer>(&self, w: &mut W, eh_frame: bool, upgrade_version: bool) -> Result<usize> {
         let encoding = self.encoding;
         let offset = w.len();
 
@@ -190,7 +194,16 @@ impl CommonInformationEntry {
                 _ => return Err(Error::UnsupportedVersion(encoding.version)),
             };
         }
-        w.write_u8(encoding.version as u8)?;
+        let version = if upgrade_version {
+            if encoding.version == 3 {
+                4
+            } else {
+                encoding.version
+            }
+        } else {
+            encoding.version
+        };
+        w.write_u8(version as u8)?;
 
         let augmentation = self.has_augmentation();
         if augmentation {
@@ -210,7 +223,7 @@ impl CommonInformationEntry {
         }
         w.write_u8(0)?;
 
-        if encoding.version >= 4 {
+        if version >= 4 {
             w.write_u8(encoding.address_size)?;
             w.write_u8(0)?; // segment_selector_size
         }
@@ -596,6 +609,7 @@ fn factored_data_offset(offset: i32, factor: i8) -> Result<i32> {
 pub(crate) mod convert {
     use super::*;
     use crate::read::{self, Reader};
+    use crate::write::remapper::RemapperTr;
     use crate::write::{ConvertError, ConvertResult};
     use std::collections::{hash_map, HashMap};
 
@@ -609,7 +623,7 @@ pub(crate) mod convert {
         /// and return `Address::Symbol { symbol, addend }`.
         pub fn from<R, Section>(
             frame: &Section,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
         ) -> ConvertResult<FrameTable>
         where
             R: Reader<Offset = usize>,
@@ -635,14 +649,13 @@ pub(crate) mod convert {
                 let cie_id = match cie_ids.entry(from_cie.offset()) {
                     hash_map::Entry::Occupied(o) => *o.get(),
                     hash_map::Entry::Vacant(e) => {
-                        let cie =
-                            CommonInformationEntry::from(from_cie, frame, &bases, convert_address)?;
+                        let cie = CommonInformationEntry::from(from_cie, frame, &bases, remapper)?;
                         let cie_id = frame_table.add_cie(cie);
                         e.insert(cie_id);
                         cie_id
                     }
                 };
-                let fde = FrameDescriptionEntry::from(&from_fde, frame, &bases, convert_address)?;
+                let fde = FrameDescriptionEntry::from(&from_fde, frame, &bases, remapper)?;
                 frame_table.add_fde(cie_id, fde);
             }
 
@@ -655,7 +668,7 @@ pub(crate) mod convert {
             from_cie: &read::CommonInformationEntry<R>,
             frame: &Section,
             bases: &read::BaseAddresses,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
         ) -> ConvertResult<CommonInformationEntry>
         where
             R: Reader<Offset = usize>,
@@ -666,7 +679,7 @@ pub(crate) mod convert {
                 from_cie.encoding(),
                 from_cie.code_alignment_factor() as u8,
                 from_cie.data_alignment_factor() as i8,
-                from_cie.return_address_register(),
+                remapper.remap_register(from_cie.return_address_register())?,
             );
 
             cie.personality = match from_cie.personality_with_encoding() {
@@ -674,7 +687,7 @@ pub(crate) mod convert {
                 // whether it is indirect.
                 Some((eh_pe, read::Pointer::Direct(p)))
                 | Some((eh_pe, read::Pointer::Indirect(p))) => {
-                    let address = convert_address(p).ok_or(ConvertError::InvalidAddress)?;
+                    let address = remapper.remap_address(p)?;
                     Some((eh_pe, address))
                 }
                 _ => None,
@@ -692,7 +705,7 @@ pub(crate) mod convert {
                     from_instruction,
                     from_cie,
                     frame,
-                    convert_address,
+                    remapper,
                     &mut offset,
                 )? {
                     cie.instructions.push(instruction);
@@ -707,23 +720,22 @@ pub(crate) mod convert {
             from_fde: &read::FrameDescriptionEntry<R>,
             frame: &Section,
             bases: &read::BaseAddresses,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
         ) -> ConvertResult<FrameDescriptionEntry>
         where
             R: Reader<Offset = usize>,
             Section: read::UnwindSection<R>,
             Section::Offset: read::UnwindOffset<usize>,
         {
-            let address =
-                convert_address(from_fde.initial_address()).ok_or(ConvertError::InvalidAddress)?;
-            let length = from_fde.len() as u32;
-            let mut fde = FrameDescriptionEntry::new(address, length);
+            let (address, length) =
+                remapper.remap_start_length(from_fde.initial_address(), from_fde.len())?;
+            let mut fde = FrameDescriptionEntry::new(address, length as u32);
 
             match from_fde.lsda() {
                 // We treat these the same because the encoding already determines
                 // whether it is indirect.
                 Some(read::Pointer::Direct(p)) | Some(read::Pointer::Indirect(p)) => {
-                    let address = convert_address(p).ok_or(ConvertError::InvalidAddress)?;
+                    let address = remapper.remap_address(p)?;
                     fde.lsda = Some(address);
                 }
                 None => {}
@@ -737,7 +749,7 @@ pub(crate) mod convert {
                     from_instruction,
                     from_cie,
                     frame,
-                    convert_address,
+                    remapper,
                     &mut offset,
                 )? {
                     fde.instructions.push((offset, instruction));
@@ -753,7 +765,7 @@ pub(crate) mod convert {
             from_instruction: read::CallFrameInstruction<R::Offset>,
             from_cie: &read::CommonInformationEntry<R>,
             frame: &Section,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
             offset: &mut u32,
         ) -> ConvertResult<Option<CallFrameInstruction>>
         where
@@ -761,7 +773,7 @@ pub(crate) mod convert {
             Section: read::UnwindSection<R>,
         {
             let convert_expression =
-                |x| Expression::from(x, from_cie.encoding(), None, None, None, convert_address);
+                |x| Expression::from(x, from_cie.encoding(), None, None, None, remapper);
             // TODO: validate integer type conversions
             Ok(Some(match from_instruction {
                 read::CallFrameInstruction::SetLoc { .. } => {
@@ -772,17 +784,17 @@ pub(crate) mod convert {
                     return Ok(None);
                 }
                 read::CallFrameInstruction::DefCfa { register, offset } => {
-                    CallFrameInstruction::Cfa(register, offset as i32)
+                    CallFrameInstruction::Cfa(remapper.remap_register(register)?, offset as i32)
                 }
                 read::CallFrameInstruction::DefCfaSf {
                     register,
                     factored_offset,
                 } => {
                     let offset = factored_offset * from_cie.data_alignment_factor();
-                    CallFrameInstruction::Cfa(register, offset as i32)
+                    CallFrameInstruction::Cfa(remapper.remap_register(register)?, offset as i32)
                 }
                 read::CallFrameInstruction::DefCfaRegister { register } => {
-                    CallFrameInstruction::CfaRegister(register)
+                    CallFrameInstruction::CfaRegister(remapper.remap_register(register)?)
                 }
 
                 read::CallFrameInstruction::DefCfaOffset { offset } => {
@@ -797,59 +809,74 @@ pub(crate) mod convert {
                     CallFrameInstruction::CfaExpression(convert_expression(expression)?)
                 }
                 read::CallFrameInstruction::Undefined { register } => {
-                    CallFrameInstruction::Undefined(register)
+                    CallFrameInstruction::Undefined(remapper.remap_register(register)?)
                 }
                 read::CallFrameInstruction::SameValue { register } => {
-                    CallFrameInstruction::SameValue(register)
+                    CallFrameInstruction::SameValue(remapper.remap_register(register)?)
                 }
                 read::CallFrameInstruction::Offset {
                     register,
                     factored_offset,
                 } => {
                     let offset = factored_offset as i64 * from_cie.data_alignment_factor();
-                    CallFrameInstruction::Offset(register, offset as i32)
+                    CallFrameInstruction::Offset(remapper.remap_register(register)?, offset as i32)
                 }
                 read::CallFrameInstruction::OffsetExtendedSf {
                     register,
                     factored_offset,
                 } => {
                     let offset = factored_offset * from_cie.data_alignment_factor();
-                    CallFrameInstruction::Offset(register, offset as i32)
+                    CallFrameInstruction::Offset(remapper.remap_register(register)?, offset as i32)
                 }
                 read::CallFrameInstruction::ValOffset {
                     register,
                     factored_offset,
                 } => {
                     let offset = factored_offset as i64 * from_cie.data_alignment_factor();
-                    CallFrameInstruction::ValOffset(register, offset as i32)
+                    CallFrameInstruction::ValOffset(
+                        remapper.remap_register(register)?,
+                        offset as i32,
+                    )
                 }
                 read::CallFrameInstruction::ValOffsetSf {
                     register,
                     factored_offset,
                 } => {
                     let offset = factored_offset * from_cie.data_alignment_factor();
-                    CallFrameInstruction::ValOffset(register, offset as i32)
+                    CallFrameInstruction::ValOffset(
+                        remapper.remap_register(register)?,
+                        offset as i32,
+                    )
                 }
                 read::CallFrameInstruction::Register {
                     dest_register,
                     src_register,
-                } => CallFrameInstruction::Register(dest_register, src_register),
+                } => CallFrameInstruction::Register(
+                    remapper.remap_register(dest_register)?,
+                    remapper.remap_register(src_register)?,
+                ),
                 read::CallFrameInstruction::Expression {
                     register,
                     expression,
                 } => {
                     let expression = expression.get(frame)?;
-                    CallFrameInstruction::Expression(register, convert_expression(expression)?)
+                    CallFrameInstruction::Expression(
+                        remapper.remap_register(register)?,
+                        convert_expression(expression)?,
+                    )
                 }
                 read::CallFrameInstruction::ValExpression {
                     register,
                     expression,
                 } => {
                     let expression = expression.get(frame)?;
-                    CallFrameInstruction::ValExpression(register, convert_expression(expression)?)
+                    CallFrameInstruction::ValExpression(
+                        remapper.remap_register(register)?,
+                        convert_expression(expression)?,
+                    )
                 }
                 read::CallFrameInstruction::Restore { register } => {
-                    CallFrameInstruction::Restore(register)
+                    CallFrameInstruction::Restore(remapper.remap_register(register)?)
                 }
                 read::CallFrameInstruction::RememberState => CallFrameInstruction::RememberState,
                 read::CallFrameInstruction::RestoreState => CallFrameInstruction::RestoreState,
@@ -869,6 +896,7 @@ mod tests {
     use super::*;
     use crate::arch::X86_64;
     use crate::read;
+    use crate::write::remapper::Remapper;
     use crate::write::EndianVec;
     use crate::{LittleEndian, Vendor};
 
@@ -931,15 +959,13 @@ mod tests {
 
                     // Test writing `.debug_frame`.
                     let mut debug_frame = DebugFrame::from(EndianVec::new(LittleEndian));
-                    frames.write_debug_frame(&mut debug_frame).unwrap();
+                    frames.write_debug_frame(&mut debug_frame, false).unwrap();
 
                     let mut read_debug_frame =
                         read::DebugFrame::new(debug_frame.slice(), LittleEndian);
                     read_debug_frame.set_address_size(address_size);
-                    let convert_frames = FrameTable::from(&read_debug_frame, &|address| {
-                        Some(Address::Constant(address))
-                    })
-                    .unwrap();
+                    let convert_frames =
+                        FrameTable::from(&read_debug_frame, &Remapper::test_remapper()).unwrap();
                     assert_eq!(frames.cies, convert_frames.cies);
                     assert_eq!(frames.fdes.len(), convert_frames.fdes.len());
                     for (a, b) in frames.fdes.iter().zip(convert_frames.fdes.iter()) {
@@ -953,10 +979,8 @@ mod tests {
 
                         let mut read_eh_frame = read::EhFrame::new(eh_frame.slice(), LittleEndian);
                         read_eh_frame.set_address_size(address_size);
-                        let convert_frames = FrameTable::from(&read_eh_frame, &|address| {
-                            Some(Address::Constant(address))
-                        })
-                        .unwrap();
+                        let convert_frames =
+                            FrameTable::from(&read_eh_frame, &Remapper::test_remapper()).unwrap();
                         assert_eq!(frames.cies, convert_frames.cies);
                         assert_eq!(frames.fdes.len(), convert_frames.fdes.len());
                         for (a, b) in frames.fdes.iter().zip(convert_frames.fdes.iter()) {
@@ -1043,16 +1067,15 @@ mod tests {
                         }
 
                         let mut debug_frame = DebugFrame::from(EndianVec::new(LittleEndian));
-                        frames.write_debug_frame(&mut debug_frame).unwrap();
+                        frames.write_debug_frame(&mut debug_frame, false).unwrap();
 
                         let mut read_debug_frame =
                             read::DebugFrame::new(debug_frame.slice(), LittleEndian);
                         read_debug_frame.set_address_size(address_size);
                         read_debug_frame.set_vendor(vendor);
-                        let frames = FrameTable::from(&read_debug_frame, &|address| {
-                            Some(Address::Constant(address))
-                        })
-                        .unwrap();
+                        let frames =
+                            FrameTable::from(&read_debug_frame, &Remapper::test_remapper())
+                                .unwrap();
 
                         assert_eq!(
                             &frames.cies.get_index(0).unwrap().instructions,

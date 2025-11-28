@@ -332,7 +332,7 @@ mod convert {
         /// A `.debug_info` reference does not refer to a valid entry.
         InvalidDebugInfoOffset,
         /// An address could not be converted.
-        InvalidAddress,
+        InvalidAddress(u64),
         /// Writing this line number instruction is not implemented yet.
         UnsupportedLineInstruction,
         /// Writing this form of line string is not implemented yet.
@@ -351,6 +351,8 @@ mod convert {
         InvalidDebugInfoRef,
         /// Invalid relative address in a range list.
         InvalidRangeRelativeAddress,
+        /// A range referenced without a set start.
+        UnstartedRange,
         /// Writing this CFI instruction is not implemented yet.
         UnsupportedCfiInstruction,
         /// Writing indirect pointers is not implemented yet.
@@ -361,6 +363,8 @@ mod convert {
         InvalidBranchTarget,
         /// Writing this unit type is not supported yet.
         UnsupportedUnitType,
+        /// Invalid register number
+        InvalidRegisterNumber(u16),
     }
 
     impl fmt::Display for ConvertError {
@@ -379,7 +383,7 @@ mod convert {
                     f,
                     "A `.debug_info` reference does not refer to a valid entry."
                 ),
-                InvalidAddress => write!(f, "An address could not be converted."),
+                InvalidAddress(addr) => write!(f, "An address could not be converted: {}.", addr),
                 UnsupportedLineInstruction => write!(
                     f,
                     "Writing this line number instruction is not implemented yet."
@@ -397,6 +401,7 @@ mod convert {
                 InvalidRangeRelativeAddress => {
                     write!(f, "Invalid relative address in a range list.")
                 }
+                UnstartedRange => write!(f, "A range referenced without a set start."),
                 UnsupportedCfiInstruction => {
                     write!(f, "Writing this CFI instruction is not implemented yet.")
                 }
@@ -409,6 +414,7 @@ mod convert {
                 ),
                 InvalidBranchTarget => write!(f, "Operation branch target is invalid."),
                 UnsupportedUnitType => write!(f, "Writing this unit type is not supported yet."),
+                InvalidRegisterNumber(reg) => write!(f, "Invalid register number: {}.", reg),
             }
         }
     }
@@ -428,4 +434,4 @@ mod convert {
 pub use self::convert::*;
 
 #[cfg(feature = "read")]
-mod remapper;
+pub mod remapper;

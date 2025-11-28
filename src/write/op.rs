@@ -839,6 +839,7 @@ pub(crate) mod convert {
     use super::*;
     use crate::common::UnitSectionOffset;
     use crate::read::{self, Reader};
+    use crate::write::remapper::RemapperTr;
     use crate::write::{ConvertError, ConvertResult, UnitId};
     use std::collections::HashMap;
 
@@ -850,7 +851,7 @@ pub(crate) mod convert {
             dwarf: Option<&read::Dwarf<R>>,
             unit: Option<&read::Unit<R>>,
             entry_ids: Option<&HashMap<UnitSectionOffset, (UnitId, UnitEntryId)>>,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
         ) -> ConvertResult<Expression> {
             let convert_unit_offset = |offset: read::UnitOffset| -> ConvertResult<_> {
                 let entry_ids = entry_ids.ok_or(ConvertError::UnsupportedOperation)?;
@@ -1001,7 +1002,7 @@ pub(crate) mod convert {
                             dwarf,
                             unit,
                             entry_ids,
-                            convert_address,
+                            remapper,
                         )?;
                         Operation::EntryValue(expression)
                     }
@@ -1010,15 +1011,14 @@ pub(crate) mod convert {
                         Operation::ParameterRef(entry)
                     }
                     read::Operation::Address { address } => {
-                        let address =
-                            convert_address(address).ok_or(ConvertError::InvalidAddress)?;
+                        let address = remapper.remap_address(address)?;
                         Operation::Address(address)
                     }
                     read::Operation::AddressIndex { index } => {
                         let dwarf = dwarf.ok_or(ConvertError::UnsupportedOperation)?;
                         let unit = unit.ok_or(ConvertError::UnsupportedOperation)?;
                         let val = dwarf.address(unit, index)?;
-                        let address = convert_address(val).ok_or(ConvertError::InvalidAddress)?;
+                        let address = remapper.remap_address(val)?;
                         Operation::Address(address)
                     }
                     read::Operation::ConstantIndex { index } => {
@@ -1064,6 +1064,7 @@ mod tests {
     use super::*;
     use crate::common::{DebugInfoOffset, Format};
     use crate::read;
+    use crate::write::remapper::Remapper;
     use crate::write::{AttributeValue, Dwarf, EndianVec, LineProgram, Sections, Unit};
     use crate::LittleEndian;
     use std::collections::HashMap;
@@ -1582,7 +1583,7 @@ mod tests {
                         Some(&read_dwarf),
                         Some(&read_unit),
                         Some(&entry_ids),
-                        &|address| Some(Address::Constant(address)),
+                        &Remapper::test_remapper(),
                     )
                     .unwrap();
                     let mut convert_operations = convert_expression.operations.iter();

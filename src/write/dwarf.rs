@@ -118,7 +118,8 @@ impl DwarfUnit {
 pub(crate) mod convert {
     use super::*;
     use crate::read::{self, Reader};
-    use crate::write::{Address, ConvertResult};
+    use crate::write::remapper::RemapperTr;
+    use crate::write::ConvertResult;
 
     impl Dwarf {
         /// Create a `write::Dwarf` by converting a `read::Dwarf`.
@@ -130,11 +131,11 @@ pub(crate) mod convert {
         /// and return `Address::Symbol { symbol, addend }`.
         pub fn from<R: Reader<Offset = usize>>(
             dwarf: &read::Dwarf<R>,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
         ) -> ConvertResult<Dwarf> {
             let mut line_strings = LineStringTable::default();
             let mut strings = StringTable::default();
-            let units = UnitTable::from(dwarf, &mut line_strings, &mut strings, convert_address)?;
+            let units = UnitTable::from(dwarf, &mut line_strings, &mut strings, remapper)?;
             // TODO: convert the line programs that were not referenced by a unit.
             let line_programs = Vec::new();
             Ok(Dwarf {

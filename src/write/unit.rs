@@ -1487,6 +1487,7 @@ pub(crate) mod convert {
     use super::*;
     use crate::common::{DwoId, UnitSectionOffset};
     use crate::read::{self, Reader};
+    use crate::write::remapper::RemapperTr;
     use crate::write::{self, ConvertError, ConvertResult, LocationList, RangeList};
     use std::collections::HashMap;
 
@@ -1506,7 +1507,7 @@ pub(crate) mod convert {
         pub strings: &'a mut write::StringTable,
         pub ranges: &'a mut write::RangeListTable,
         pub locations: &'a mut write::LocationListTable,
-        pub convert_address: &'a dyn Fn(u64) -> Option<Address>,
+        pub remapper: &'a dyn RemapperTr,
         pub base_address: Address,
         pub line_program_offset: Option<DebugLineOffset>,
         pub line_program_files: Vec<FileId>,
@@ -1528,7 +1529,7 @@ pub(crate) mod convert {
             dwarf: &read::Dwarf<R>,
             line_strings: &mut write::LineStringTable,
             strings: &mut write::StringTable,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
         ) -> ConvertResult<UnitTable> {
             let base_id = BaseId::default();
             let mut unit_entries = Vec::new();
@@ -1555,7 +1556,7 @@ pub(crate) mod convert {
                     dwarf,
                     line_strings,
                     strings,
-                    convert_address,
+                    remapper,
                 )?);
             }
 
@@ -1615,28 +1616,23 @@ pub(crate) mod convert {
             dwarf: &read::Dwarf<R>,
             line_strings: &mut write::LineStringTable,
             strings: &mut write::StringTable,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
         ) -> ConvertResult<Unit> {
             let from_unit = unit.from_unit;
-            let base_address =
-                convert_address(from_unit.low_pc).ok_or(ConvertError::InvalidAddress)?;
+            let base_address = remapper.remap_address(from_unit.low_pc)?;
 
-            let (line_program_offset, line_program, line_program_files) =
-                match from_unit.line_program {
-                    Some(ref from_program) => {
-                        let from_program = from_program.clone();
-                        let line_program_offset = from_program.header().offset();
-                        let (line_program, line_program_files) = LineProgram::from(
-                            from_program,
-                            dwarf,
-                            line_strings,
-                            strings,
-                            convert_address,
-                        )?;
-                        (Some(line_program_offset), line_program, line_program_files)
-                    }
-                    None => (None, LineProgram::none(), Vec::new()),
-                };
+            let (line_program_offset, line_program, line_program_files) = match from_unit
+                .line_program
+            {
+                Some(ref from_program) => {
+                    let from_program = from_program.clone();
+                    let line_program_offset = from_program.header().offset();
+                    let (line_program, line_program_files) =
+                        LineProgram::from(from_program, dwarf, line_strings, strings, remapper)?;
+                    (Some(line_program_offset), line_program, line_program_files)
+                }
+                None => (None, LineProgram::none(), Vec::new()),
+            };
 
             let mut ranges = RangeListTable::default();
             let mut locations = LocationListTable::default();
@@ -1649,7 +1645,7 @@ pub(crate) mod convert {
                 strings,
                 ranges: &mut ranges,
                 locations: &mut locations,
-                convert_address,
+                remapper,
                 base_address,
                 line_program_offset,
                 line_program_files,
@@ -1753,9 +1749,9 @@ pub(crate) mod convert {
             from: read::AttributeValue<R>,
         ) -> ConvertResult<Option<AttributeValue>> {
             let to = match from {
-                read::AttributeValue::Addr(val) => match (context.convert_address)(val) {
-                    Some(val) => AttributeValue::Address(val),
-                    None => return Err(ConvertError::InvalidAddress),
+                read::AttributeValue::Addr(val) => match context.remapper.remap_address(val) {
+                    Ok(val) => AttributeValue::Address(val),
+                    Err(e) => return Err(e),
                 },
                 read::AttributeValue::Block(r) => AttributeValue::Block(r.to_slice()?.into()),
                 read::AttributeValue::Data1(val) => AttributeValue::Data1(val),
@@ -1771,7 +1767,7 @@ pub(crate) mod convert {
                         Some(context.dwarf),
                         Some(context.unit),
                         Some(context.entry_ids),
-                        context.convert_address,
+                        context.remapper,
                     )?;
                     AttributeValue::Exprloc(expression)
                 }
@@ -1784,9 +1780,9 @@ pub(crate) mod convert {
                 }
                 read::AttributeValue::DebugAddrIndex(index) => {
                     let val = context.dwarf.address(context.unit, index)?;
-                    match (context.convert_address)(val) {
-                        Some(val) => AttributeValue::Address(val),
-                        None => return Err(ConvertError::InvalidAddress),
+                    match context.remapper.remap_address(val) {
+                        Ok(val) => AttributeValue::Address(val),
+                        Err(e) => return Err(e),
                     }
                 }
                 read::AttributeValue::UnitRef(val) => {
@@ -1931,6 +1927,7 @@ mod tests {
     use crate::common::LineEncoding;
     use crate::constants;
     use crate::read;
+    use crate::write::remapper::Remapper;
     use crate::write::{
         Dwarf, DwarfUnit, EndianVec, LineString, Location, LocationList, Range, RangeList,
     };
@@ -2205,8 +2202,7 @@ mod tests {
 
         assert!(read_units.next().unwrap().is_none());
 
-        let convert_dwarf =
-            Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address))).unwrap();
+        let convert_dwarf = Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
         assert_eq!(convert_dwarf.units.count(), dwarf.units.count());
 
         for i in 0..convert_dwarf.units.count() {
@@ -2518,8 +2514,7 @@ mod tests {
                     );
 
                     let convert_dwarf =
-                        Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address)))
-                            .unwrap();
+                        Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
                     let convert_unit = convert_dwarf.units.get(convert_dwarf.units.id(0));
                     let convert_root = convert_unit.get(convert_unit.root());
                     let mut convert_entries = convert_root.children();
@@ -2684,8 +2679,7 @@ mod tests {
             ))
         );
 
-        let convert_dwarf =
-            Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address))).unwrap();
+        let convert_dwarf = Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
         let convert_units = &convert_dwarf.units;
         assert_eq!(convert_units.count(), dwarf.units.count());
 
@@ -2922,8 +2916,7 @@ mod tests {
                     assert_eq!(read_path, file_bytes2);
 
                     let convert_dwarf =
-                        Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address)))
-                            .unwrap();
+                        Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
                     let convert_unit = convert_dwarf.units.get(convert_dwarf.units.id(0));
                     let convert_root = convert_unit.get(convert_unit.root());
                     let mut convert_entries = convert_root.children();

@@ -310,7 +310,6 @@ mod convert {
     use super::*;
 
     use crate::read::{self, Reader};
-    use crate::write::remapper::AddressRemapper;
     use crate::write::{ConvertResult, ConvertUnitContext};
 
     impl LocationList {
@@ -327,43 +326,40 @@ mod convert {
                     Some(context.dwarf),
                     Some(context.unit),
                     Some(context.entry_ids),
-                    context.convert_address,
+                    context.remapper,
                 )
             };
             let get_unit_addr = |x| context.dwarf.address(context.unit, x);
             let mut loc_list = Vec::new();
-            let mut remapper = AddressRemapper::new(context.convert_address, "LocationList");
+            let _unused = context.remapper.begin_range(0)?;
             while let Some(from_loc) = from.next()? {
                 let loc = match from_loc {
                     read::RawLocListEntry::AddressOrOffsetPair { begin, end, data } => {
                         let data = convert_expression(data)?;
                         if have_base_address {
-                            remapper.set_cur_loc("AddressOrOffsetPair OffsetPair");
-                            let (begin, end) = remapper.remap_start_end_offsets(begin, end)?;
+                            let (begin, end) =
+                                context.remapper.remap_start_end_offsets(begin, end)?;
                             Location::OffsetPair { begin, end, data }
                         } else {
                             // TODO: is this correct? Should I assume instead base address 0?
-                            remapper.set_cur_loc("AddressOrOffsetPair StartEnd");
-                            let (begin, end) = remapper.remap_start_end(begin, end)?;
+                            let (begin, end) = context.remapper.remap_start_end(begin, end)?;
                             Location::StartEnd { begin, end, data }
                         }
                     }
                     read::RawLocListEntry::BaseAddress { addr } => {
-                        remapper.set_cur_loc("BaseAddress");
                         have_base_address = true;
-                        let address = remapper.begin_range(addr)?;
+                        let address = context.remapper.begin_range(addr)?;
                         Location::BaseAddress { address }
                     }
                     read::RawLocListEntry::BaseAddressx { addr } => {
-                        remapper.set_cur_loc("BaseAddressx");
                         have_base_address = true;
-                        let address = remapper.begin_range(get_unit_addr(addr)?)?;
+                        let address = context.remapper.begin_range(get_unit_addr(addr)?)?;
                         Location::BaseAddress { address }
                     }
                     read::RawLocListEntry::StartxEndx { begin, end, data } => {
-                        remapper.set_cur_loc("StartxEndx");
-                        let (begin, end) =
-                            remapper.remap_start_end(get_unit_addr(begin)?, get_unit_addr(end)?)?;
+                        let (begin, end) = context
+                            .remapper
+                            .remap_start_end(get_unit_addr(begin)?, get_unit_addr(end)?)?;
                         let data = convert_expression(data)?;
                         Location::StartEnd { begin, end, data }
                     }
@@ -372,9 +368,9 @@ mod convert {
                         length,
                         data,
                     } => {
-                        remapper.set_cur_loc("StartxLength");
-                        let (begin, length) =
-                            remapper.remap_start_length(get_unit_addr(begin)?, length)?;
+                        let (begin, length) = context
+                            .remapper
+                            .remap_start_length(get_unit_addr(begin)?, length)?;
                         let data = convert_expression(data)?;
                         Location::StartLength {
                             begin,
@@ -383,14 +379,12 @@ mod convert {
                         }
                     }
                     read::RawLocListEntry::OffsetPair { begin, end, data } => {
-                        remapper.set_cur_loc("OffsetPair");
-                        let (begin, end) = remapper.remap_start_end_offsets(begin, end)?;
+                        let (begin, end) = context.remapper.remap_start_end_offsets(begin, end)?;
                         let data = convert_expression(data)?;
                         Location::OffsetPair { begin, end, data }
                     }
                     read::RawLocListEntry::StartEnd { begin, end, data } => {
-                        remapper.set_cur_loc("StartEnd");
-                        let (begin, end) = remapper.remap_start_end(begin, end)?;
+                        let (begin, end) = context.remapper.remap_start_end(begin, end)?;
                         let data = convert_expression(data)?;
                         Location::StartEnd { begin, end, data }
                     }
@@ -399,8 +393,7 @@ mod convert {
                         length,
                         data,
                     } => {
-                        remapper.set_cur_loc("StartLength");
-                        let (begin, length) = remapper.remap_start_length(begin, length)?;
+                        let (begin, length) = context.remapper.remap_start_length(begin, length)?;
                         let data = convert_expression(data)?;
                         Location::StartLength {
                             begin,
@@ -437,6 +430,7 @@ mod tests {
         DebugStrOffsetsBase, Format,
     };
     use crate::read;
+    use crate::write::remapper::Remapper;
     use crate::write::{
         ConvertUnitContext, EndianVec, LineStringTable, RangeListTable, StringTable,
     };
@@ -533,7 +527,7 @@ mod tests {
                         strings: &mut strings,
                         ranges: &mut RangeListTable::default(),
                         locations: &mut locations,
-                        convert_address: &|address| Some(Address::Constant(address)),
+                        remapper: &Remapper::test_remapper(),
                         base_address: Address::Constant(0),
                         line_program_offset: None,
                         line_program_files: Vec::new(),

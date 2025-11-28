@@ -6,7 +6,8 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use gimli::read;
-use gimli::write::{self, Address, EndianVec};
+use gimli::write::remapper::Remapper;
+use gimli::write::{self, EndianVec};
 use gimli::LittleEndian;
 
 fn read_section(section: &str) -> Vec<u8> {
@@ -65,7 +66,7 @@ fn test_convert_debug_info() {
         ..Default::default()
     };
 
-    let mut dwarf = write::Dwarf::from(&dwarf, &|address| Some(Address::Constant(address)))
+    let mut dwarf = write::Dwarf::from(&dwarf, &Remapper::test_remapper())
         .expect("Should convert DWARF information");
 
     assert_eq!(dwarf.units.count(), 23);
@@ -117,7 +118,7 @@ fn test_convert_debug_info() {
         ..Default::default()
     };
 
-    let dwarf = write::Dwarf::from(&dwarf, &|address| Some(Address::Constant(address)))
+    let dwarf = write::Dwarf::from(&dwarf, &Remapper::test_remapper())
         .expect("Should convert DWARF information");
 
     assert_eq!(dwarf.units.count(), 23);
@@ -135,7 +136,7 @@ fn test_convert_eh_frame() {
     let mut eh_frame = read::EhFrame::new(&eh_frame, LittleEndian);
     // The `.eh_frame` fixture data was created on a 64-bit machine.
     eh_frame.set_address_size(8);
-    let frames = write::FrameTable::from(&eh_frame, &|address| Some(Address::Constant(address)))
+    let frames = write::FrameTable::from(&eh_frame, &Remapper::test_remapper())
         .expect("Should convert eh_frame information");
     assert_eq!(frames.cie_count(), 2);
     assert_eq!(frames.fde_count(), 3482);
@@ -151,7 +152,7 @@ fn test_convert_eh_frame() {
     // Convert new section
     let mut eh_frame = read::EhFrame::new(eh_frame, LittleEndian);
     eh_frame.set_address_size(8);
-    let frames = write::FrameTable::from(&eh_frame, &|address| Some(Address::Constant(address)))
+    let frames = write::FrameTable::from(&eh_frame, &Remapper::test_remapper())
         .expect("Should convert eh_frame information");
     assert_eq!(frames.cie_count(), 2);
     assert_eq!(frames.fde_count(), 3482);

@@ -1037,7 +1037,7 @@ define_section!(
 mod convert {
     use super::*;
     use crate::read::{self, Reader};
-    use crate::write::remapper::AddressRemapper;
+    use crate::write::remapper::RemapperTr;
     use crate::write::{self, ConvertError, ConvertResult};
 
     impl LineProgram {
@@ -1049,7 +1049,7 @@ mod convert {
             dwarf: &read::Dwarf<R>,
             line_strings: &mut write::LineStringTable,
             strings: &mut write::StringTable,
-            convert_address: &dyn Fn(u64) -> Option<Address>,
+            remapper: &dyn RemapperTr,
         ) -> ConvertResult<(LineProgram, Vec<FileId>)> {
             // Create mappings in case the source has duplicate files or directories.
             let mut dirs = Vec::new();
@@ -1154,14 +1154,13 @@ mod convert {
             let mut instructions = from_program.header().instructions();
             let mut orig_address = None;
             let mut remap_address = None;
-            let mut remapper = AddressRemapper::new(convert_address, "LineProgram");
+            let mut _unused = remapper.begin_range(0)?;
             while let Some(instruction) = instructions.next_instruction(from_program.header())? {
                 match instruction {
                     read::LineInstruction::SetAddress(orig_val) => {
                         if program.in_sequence() {
                             return Err(ConvertError::UnsupportedLineInstruction);
                         }
-                        remapper.set_cur_loc("SetAddress");
                         remap_address = Some(remapper.remap_address(orig_val)?);
                         orig_address = Some(orig_val);
                         from_row
@@ -1174,7 +1173,6 @@ mod convert {
                         if from_row.execute(instruction, &mut from_program)? {
                             if !program.in_sequence() {
                                 program.begin_sequence(remap_address);
-                                remapper.set_cur_loc("BeginSequence");
                                 remap_address = None;
                                 if let Some(orig_addr) = orig_address {
                                     orig_address = None;
@@ -1182,12 +1180,10 @@ mod convert {
                                 }
                             }
                             if from_row.end_sequence() {
-                                remapper.set_cur_loc("EndSequence");
                                 let end_offset = remapper.remap_offset(from_row.address())?;
                                 program.end_sequence(end_offset);
                                 remapper.end_range()?;
                             } else {
-                                remapper.set_cur_loc("GenerateRow");
                                 program.row().address_offset =
                                     remapper.remap_offset(from_row.address())?;
                                 program.row().op_index = from_row.op_index();
@@ -1256,6 +1252,7 @@ mod convert {
 mod tests {
     use super::*;
     use crate::read;
+    use crate::write::remapper::Remapper;
     use crate::write::{AttributeValue, Dwarf, EndianVec, Sections, Unit};
     use crate::LittleEndian;
 
@@ -1352,8 +1349,7 @@ mod tests {
         let mut sections = Sections::new(EndianVec::new(LittleEndian));
         dwarf.write(&mut sections).unwrap();
         let read_dwarf = sections.read(LittleEndian);
-        let convert_dwarf =
-            Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address))).unwrap();
+        let convert_dwarf = Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
 
         let mut convert_units = convert_dwarf.units.iter();
         for (_, unit) in dwarf.units.iter() {
@@ -1686,8 +1682,7 @@ mod tests {
                         let read_dwarf = sections.read(LittleEndian);
 
                         let convert_dwarf =
-                            Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address)))
-                                .unwrap();
+                            Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
                         let convert_unit = convert_dwarf.units.iter().next().unwrap().1;
                         let convert_program = &convert_unit.line_program;
 
@@ -2015,8 +2010,7 @@ mod tests {
                     dwarf.write(&mut sections).unwrap();
                     let read_dwarf = sections.read(LittleEndian);
                     let _convert_dwarf =
-                        Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address)))
-                            .unwrap();
+                        Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
                 }
             }
         }
@@ -2079,8 +2073,7 @@ mod tests {
                     let read_dwarf = sections.read(LittleEndian);
 
                     let convert_dwarf =
-                        Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address)))
-                            .unwrap();
+                        Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
                     let convert_unit = convert_dwarf.units.iter().next().unwrap().1;
                     let convert_program = &convert_unit.line_program;
 
@@ -2160,8 +2153,7 @@ mod tests {
                     assert_eq!(read_source.slice(), source1.as_bytes());
 
                     let convert_dwarf =
-                        Dwarf::from(&read_dwarf, &|address| Some(Address::Constant(address)))
-                            .unwrap();
+                        Dwarf::from(&read_dwarf, &Remapper::test_remapper()).unwrap();
                     let (_, convert_unit) = convert_dwarf.units.iter().next().unwrap();
                     let convert_program = &convert_unit.line_program;
                     let convert_file_id = convert_program.files().next().unwrap().0;
