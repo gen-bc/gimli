@@ -54,6 +54,8 @@ pub trait RemapperTr {
         orig_start: u64,
         orig_length: u64,
     ) -> ConvertResult<(Address, u64)>;
+    /// Advance the bast address (if any) and return remapped offset
+    fn advance_loc(&self, orig_offset: u64) -> ConvertResult<u64>;
 }
 
 /// Address remapper struct implementing the RemapperTr trait
@@ -127,9 +129,10 @@ impl RemapperTr for Remapper<'_> {
                 info!("Remapped register {:?} to {:?}", orig_register, reg);
                 Ok(reg)
             }
-            Err(e) => {
-                error!("Failed to remap register {:?}", orig_register);
-                Err(e)
+            Err(_e) => {
+                //warn!("Failed to remap register {:?}", orig_register);
+                //Err(e)
+                Ok(Register(0))
             }
         }
     }
@@ -150,11 +153,11 @@ impl RemapperTr for Remapper<'_> {
 
     // Start a new range, so that offsets can be remapped relative to this address
     fn begin_range(&self, orig_address: u64) -> ConvertResult<Address> {
-        let remap_address = self.remap_address_as_u64(orig_address)?;
-        info!("Starting range at {orig_address:#x}/{remap_address:#x}");
+        let remapped_address = self.remap_address_as_u64(orig_address)?;
+        info!("Starting range at {orig_address:#x}/{remapped_address:#x}");
         self.orig_range_start_addr.set(Some(orig_address));
-        self.remap_range_start_addr.set(Some(remap_address));
-        Ok(Address::Constant(remap_address))
+        self.remap_range_start_addr.set(Some(remapped_address));
+        Ok(Address::Constant(remapped_address))
     }
 
     // Explicitly indicate the end of a range
@@ -169,7 +172,7 @@ impl RemapperTr for Remapper<'_> {
             Ok(())
         } else {
             error!("Ending range, but no range was started",);
-            Err(ConvertError::InvalidRangeRelativeAddress)
+            Err(ConvertError::UnstartedRange)
         }
     }
 
@@ -188,18 +191,18 @@ impl RemapperTr for Remapper<'_> {
             (Some(orig_start), Some(remap_start)) => {
                 // Calculate the remapped offset
                 let orig_end = orig_start + aligned_offset;
-                let remap_end = self.remap_address_as_u64(orig_end)?;
-                Self::verify_remapped_start_end(remap_start, remap_end)?;
+                let remapped_end = self.remap_address_as_u64(orig_end)?;
+                Self::verify_remapped_start_end(remap_start, remapped_end)?;
                 // Re-add the alignment remainder (if any)
-                let remap_offset = remap_end - remap_start + offset_aligned_remainder;
+                let remapped_offset = remapped_end - remap_start + offset_aligned_remainder;
                 info!(
-                    "Remapped offset {orig_start:#x}+{orig_offset:#x} to {remap_start:#x}+{remap_offset:#x}",
+                    "Remapped offset {orig_start:#x}+{orig_offset:#x} to {remap_start:#x}+{remapped_offset:#x}",
                 );
-                Ok(remap_offset)
+                Ok(remapped_offset)
             }
             _ => {
                 error!("Cannot remap offset if there is no range start");
-                Err(ConvertError::InvalidRangeRelativeAddress)
+                Err(ConvertError::UnstartedRange)
             }
         }
     }
@@ -210,15 +213,15 @@ impl RemapperTr for Remapper<'_> {
         orig_start_addr: u64,
         orig_end_addr: u64,
     ) -> ConvertResult<(Address, Address)> {
-        let remap_start_addr = self.remap_address_as_u64(orig_start_addr)?;
-        let remap_end_addr = self.remap_address_as_u64(orig_end_addr)?;
-        Self::verify_remapped_start_end(remap_start_addr, remap_end_addr)?;
+        let remapped_start_addr = self.remap_address_as_u64(orig_start_addr)?;
+        let remapped_end_addr = self.remap_address_as_u64(orig_end_addr)?;
+        Self::verify_remapped_start_end(remapped_start_addr, remapped_end_addr)?;
         info!(
-            "Remapped (start, end) {orig_start_addr:#x}:{orig_end_addr:#x} to {remap_start_addr:#x}:{remap_end_addr:#x}",
+            "Remapped (start, end) {orig_start_addr:#x}:{orig_end_addr:#x} to {remapped_start_addr:#x}:{remapped_end_addr:#x}",
         );
         Ok((
-            Address::Constant(remap_start_addr),
-            Address::Constant(remap_end_addr),
+            Address::Constant(remapped_start_addr),
+            Address::Constant(remapped_end_addr),
         ))
     }
 
@@ -228,13 +231,13 @@ impl RemapperTr for Remapper<'_> {
         orig_start_offset: u64,
         orig_end_offset: u64,
     ) -> ConvertResult<(u64, u64)> {
-        let remap_start_offset = self.remap_offset(orig_start_offset)?;
-        let remap_end_offset = self.remap_offset(orig_end_offset)?;
-        Self::verify_remapped_start_end(remap_start_offset, remap_end_offset)?;
+        let remapped_start_offset = self.remap_offset(orig_start_offset)?;
+        let remapped_end_offset = self.remap_offset(orig_end_offset)?;
+        Self::verify_remapped_start_end(remapped_start_offset, remapped_end_offset)?;
         info!(
-            "Remapped (start, end) offsets {orig_start_offset:#x}:{orig_end_offset:#x} to {remap_start_offset:#x}:{remap_end_offset:#x}",
+            "Remapped (start, end) offsets {orig_start_offset:#x}:{orig_end_offset:#x} to {remapped_start_offset:#x}:{remapped_end_offset:#x}",
         );
-        Ok((remap_start_offset, remap_end_offset))
+        Ok((remapped_start_offset, remapped_end_offset))
     }
 
     // Remap a pair of (start address, length)
@@ -245,17 +248,43 @@ impl RemapperTr for Remapper<'_> {
     ) -> ConvertResult<(Address, u64)> {
         // Create a new, temporary remapper to avoid messing with the current range
         let temp_remapper = Remapper::new(self.convert_address, self.convert_register);
-        let remap_start_addr = temp_remapper.remap_address_as_u64(orig_start)?;
-        temp_remapper.orig_range_start_addr.set(Some(orig_start));
-        temp_remapper
-            .remap_range_start_addr
-            .set(Some(remap_start_addr));
-        let remap_length = temp_remapper.remap_offset(orig_length)?;
+        let remapped_start_addr = match temp_remapper.begin_range(orig_start)? {
+            Address::Constant(addr) => Ok(addr),
+            Address::Symbol { .. } => {
+                error!("Cannot convert symbol address to u64",);
+                Err(ConvertError::InvalidAddress(orig_start))
+            }
+        }?;
+        let remapped_length = temp_remapper.remap_offset(orig_length)?;
 
         info!(
-            "Remapped (start, length) pair {orig_start:#x}:{orig_length:#x} to {remap_start_addr:#x}:{remap_length:#x}",
+            "Remapped (start, length) pair {orig_start:#x}:{orig_length:#x} to {remapped_start_addr:#x}:{remapped_length:#x}",
         );
 
-        Ok((Address::Constant(remap_start_addr), remap_length))
+        Ok((Address::Constant(remapped_start_addr), remapped_length))
+    }
+
+    // Advance the bast address (if any) and return remapped offset
+    fn advance_loc(&self, orig_offset: u64) -> ConvertResult<u64> {
+        let remapped_offset = self.remap_offset(orig_offset)?;
+        match (
+            self.orig_range_start_addr.get(),
+            self.remap_range_start_addr.get(),
+        ) {
+            (Some(orig_start), Some(remap_start)) => {
+                let new_orig_start = orig_start + orig_offset;
+                let new_remap_start = remap_start + remapped_offset;
+                self.orig_range_start_addr.set(Some(new_orig_start));
+                self.remap_range_start_addr.set(Some(new_remap_start));
+                info!(
+                    "Advanced loc by {orig_offset:#x}, new range start {new_orig_start:#x}/{new_remap_start:#x}",
+                );
+                Ok(remapped_offset)
+            }
+            _ => {
+                error!("Cannot advance loc if there is no range start");
+                Err(ConvertError::UnstartedRange)
+            }
+        }
     }
 }

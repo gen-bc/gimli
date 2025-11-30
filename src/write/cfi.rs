@@ -727,9 +727,10 @@ pub(crate) mod convert {
             Section: read::UnwindSection<R>,
             Section::Offset: read::UnwindOffset<usize>,
         {
-            let (address, length) =
-                remapper.remap_start_length(from_fde.initial_address(), from_fde.len())?;
+            let orig_address = from_fde.initial_address();
+            let (address, length) = remapper.remap_start_length(orig_address, from_fde.len())?;
             let mut fde = FrameDescriptionEntry::new(address, length as u32);
+            remapper.begin_range(orig_address)?;
 
             match from_fde.lsda() {
                 // We treat these the same because the encoding already determines
@@ -780,7 +781,10 @@ pub(crate) mod convert {
                     return Err(ConvertError::UnsupportedCfiInstruction);
                 }
                 read::CallFrameInstruction::AdvanceLoc { delta } => {
-                    *offset += delta * from_cie.code_alignment_factor() as u32;
+                    // TODO: before or after multiplying by code alignment factor? (currently 1)
+                    let delta = delta * from_cie.code_alignment_factor() as u32;
+                    let delta = remapper.advance_loc(delta as u64)? as u32;
+                    *offset += delta;
                     return Ok(None);
                 }
                 read::CallFrameInstruction::DefCfa { register, offset } => {

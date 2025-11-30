@@ -945,16 +945,21 @@ pub(crate) mod convert {
                         Operation::UnsignedConstant(value)
                     }
                     read::Operation::SignedConstant { value } => Operation::SignedConstant(value),
-                    read::Operation::Register { register } => Operation::Register(register),
+                    read::Operation::Register { register } => {
+                        Operation::Register(remapper.remap_register(register)?)
+                    }
                     read::Operation::RegisterOffset {
                         register,
                         offset,
                         base_type,
                     } => {
                         if base_type.0 != 0 {
-                            Operation::RegisterType(register, convert_unit_offset(base_type)?)
+                            Operation::RegisterType(
+                                remapper.remap_register(register)?,
+                                convert_unit_offset(base_type)?,
+                            )
                         } else {
-                            Operation::RegisterOffset(register, offset)
+                            Operation::RegisterOffset(remapper.remap_register(register)?, offset)
                         }
                     }
                     read::Operation::FrameOffset { offset } => Operation::FrameOffset(offset),
