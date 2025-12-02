@@ -59,20 +59,16 @@ impl FrameTable {
     }
 
     /// Write the frame table entries to the given `.debug_frame` section.
-    pub fn write_debug_frame<W: Writer>(
-        &self,
-        w: &mut DebugFrame<W>,
-        upgrade_version: bool,
-    ) -> Result<()> {
-        self.write(&mut w.0, false, upgrade_version)
+    pub fn write_debug_frame<W: Writer>(&self, w: &mut DebugFrame<W>) -> Result<()> {
+        self.write(&mut w.0, false)
     }
 
     /// Write the frame table entries to the given `.eh_frame` section.
     pub fn write_eh_frame<W: Writer>(&self, w: &mut EhFrame<W>) -> Result<()> {
-        self.write(&mut w.0, true, false)
+        self.write(&mut w.0, true)
     }
 
-    fn write<W: Writer>(&self, w: &mut W, eh_frame: bool, upgrade_version: bool) -> Result<()> {
+    fn write<W: Writer>(&self, w: &mut W, eh_frame: bool) -> Result<()> {
         let mut cie_offsets = vec![None; self.cies.len()];
         for (cie_id, fde) in &self.fdes {
             let cie_index = cie_id.index;
@@ -81,7 +77,7 @@ impl FrameTable {
                 Some(offset) => offset,
                 None => {
                     // Only write CIEs as they are referenced.
-                    let offset = cie.write(w, eh_frame, upgrade_version)?;
+                    let offset = cie.write(w, eh_frame)?;
                     cie_offsets[cie_index] = Some(offset);
                     offset
                 }
@@ -168,7 +164,7 @@ impl CommonInformationEntry {
     }
 
     /// Returns the section offset of the CIE.
-    fn write<W: Writer>(&self, w: &mut W, eh_frame: bool, upgrade_version: bool) -> Result<usize> {
+    fn write<W: Writer>(&self, w: &mut W, eh_frame: bool) -> Result<usize> {
         let encoding = self.encoding;
         let offset = w.len();
 
@@ -194,15 +190,7 @@ impl CommonInformationEntry {
                 _ => return Err(Error::UnsupportedVersion(encoding.version)),
             };
         }
-        let version = if upgrade_version {
-            if encoding.version == 3 {
-                4
-            } else {
-                encoding.version
-            }
-        } else {
-            encoding.version
-        };
+        let version = encoding.version;
         w.write_u8(version as u8)?;
 
         let augmentation = self.has_augmentation();
@@ -963,7 +951,7 @@ mod tests {
 
                     // Test writing `.debug_frame`.
                     let mut debug_frame = DebugFrame::from(EndianVec::new(LittleEndian));
-                    frames.write_debug_frame(&mut debug_frame, false).unwrap();
+                    frames.write_debug_frame(&mut debug_frame).unwrap();
 
                     let mut read_debug_frame =
                         read::DebugFrame::new(debug_frame.slice(), LittleEndian);
@@ -1071,7 +1059,7 @@ mod tests {
                         }
 
                         let mut debug_frame = DebugFrame::from(EndianVec::new(LittleEndian));
-                        frames.write_debug_frame(&mut debug_frame, false).unwrap();
+                        frames.write_debug_frame(&mut debug_frame).unwrap();
 
                         let mut read_debug_frame =
                             read::DebugFrame::new(debug_frame.slice(), LittleEndian);

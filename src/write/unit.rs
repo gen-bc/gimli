@@ -1656,9 +1656,10 @@ pub(crate) mod convert {
                 entry.convert_attributes(&mut context, &unit.entry_offsets)?;
             }
 
+            let encoding = remapper.remap_encoding(unit.encoding)?;
             Ok(Unit {
                 base_id: unit.base_id,
-                encoding: unit.encoding,
+                encoding,
                 line_program,
                 ranges,
                 locations,

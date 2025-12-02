@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use once_cell::sync::OnceCell;
 
 use crate::common::{Encoding, Register};
 use crate::constants::{self, DwOp};
@@ -502,7 +503,46 @@ enum Operation {
     WasmStack(u32),
 }
 
+static VIRTUAL_STACK_ADDR: OnceCell<Address> = OnceCell::new();
+/// Ugly hack
+pub fn set_virtual_stack_addr(addr: u64) {
+    VIRTUAL_STACK_ADDR.set(Address::Constant(addr)).unwrap();
+}
+fn get_virtual_stack_addr() -> Option<Address> {
+    VIRTUAL_STACK_ADDR.get().copied()
+}
+const VIRTUAL_STACK_REGISTER: Register = Register(25);
+const VIRTUAL_FRAME_REGISTER: Register = Register(29);
+
 impl Operation {
+    fn patch_virtual_stack<W: Writer>(
+        w: &mut W,
+        address_size: u8,
+        register: Register,
+    ) -> Result<()> {
+        if !matches!(register, VIRTUAL_STACK_REGISTER | VIRTUAL_FRAME_REGISTER) {
+            return Ok(());
+        }
+        if let Some(virtual_stack_address) = get_virtual_stack_addr() {
+            // Add the offset from the virtual stack pointer
+            w.write_u8(constants::DW_OP_addr.0)?;
+            w.write_address(virtual_stack_address, address_size)?;
+            w.write_u8(constants::DW_OP_plus.0)?;
+        }
+        Ok(())
+    }
+
+    fn patched_virtual_stack_size(register: Register, address_size: u8) -> Result<usize> {
+        if !matches!(register, VIRTUAL_STACK_REGISTER | VIRTUAL_FRAME_REGISTER) {
+            return Ok(0);
+        }
+        if get_virtual_stack_addr().is_some() {
+            Ok(1 + address_size as usize + 1)
+        } else {
+            Ok(0)
+        }
+    }
+
     fn size(&self, encoding: Encoding, unit_offsets: Option<&UnitOffsets>) -> Result<usize> {
         let base_size = |entry| match unit_offsets {
             Some(offsets) => offsets
@@ -524,13 +564,21 @@ impl Operation {
             }
             Operation::SignedConstant(value) => sleb128_size(value),
             Operation::ConstantType(base, ref value) => base_size(base)? + 1 + value.len(),
-            Operation::FrameOffset(offset) => sleb128_size(offset),
+            Operation::FrameOffset(offset) => {
+                sleb128_size(offset)
+                    + Self::patched_virtual_stack_size(
+                        VIRTUAL_FRAME_REGISTER,
+                        encoding.address_size,
+                    )?
+            }
             Operation::RegisterOffset(register, offset) => {
-                if register.0 < 32 {
+                let mut size = if register.0 < 32 {
                     sleb128_size(offset)
                 } else {
                     uleb128_size(register.0.into()) + sleb128_size(offset)
-                }
+                };
+                size += Self::patched_virtual_stack_size(register, encoding.address_size)?;
+                size
             }
             Operation::RegisterType(register, base) => {
                 uleb128_size(register.0.into()) + base_size(base)?
@@ -604,6 +652,7 @@ impl Operation {
                 .ok_or(Error::UnsupportedExpressionForwardReference),
             None => Err(Error::UnsupportedCfiExpressionReference),
         };
+
         match *self {
             Operation::Raw(ref bytecode) => w.write(bytecode)?,
             Operation::Simple(opcode) => w.write_u8(opcode.0)?,
@@ -636,6 +685,7 @@ impl Operation {
             Operation::FrameOffset(offset) => {
                 w.write_u8(constants::DW_OP_fbreg.0)?;
                 w.write_sleb128(offset)?;
+                Self::patch_virtual_stack(w, encoding.address_size, VIRTUAL_FRAME_REGISTER)?
             }
             Operation::RegisterOffset(register, offset) => {
                 if register.0 < 32 {
@@ -645,6 +695,7 @@ impl Operation {
                     w.write_uleb128(register.0.into())?;
                 }
                 w.write_sleb128(offset)?;
+                Self::patch_virtual_stack(w, encoding.address_size, register)?
             }
             Operation::RegisterType(register, base) => {
                 if encoding.version >= 5 {

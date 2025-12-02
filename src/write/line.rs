@@ -1057,7 +1057,7 @@ mod convert {
 
             let mut program = {
                 let from_header = from_program.header();
-                let encoding = from_header.encoding();
+                let encoding = remapper.remap_encoding(from_header.encoding())?;
 
                 let working_dir = match from_header.directory(0) {
                     Some(working_dir) => {

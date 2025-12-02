@@ -20,12 +20,14 @@ use core::cell::Cell;
 
 use crate::{
     write::{Address, ConvertError, ConvertResult},
-    Register,
+    Encoding, Format, Register,
 };
 use log::{error, info};
 
 /// Trait for remapping addresses and registers
 pub trait RemapperTr {
+    /// Remap DWARF encoding as needed
+    fn remap_encoding(&self, encoding: Encoding) -> ConvertResult<Encoding>;
     /// Remap a register from the original to the new one
     fn remap_register(&self, orig_register: Register) -> ConvertResult<Register>;
     /// Remap a single address
@@ -67,6 +69,7 @@ pub struct Remapper<'a> {
     // Current range start addresses for offset calculations
     orig_range_start_addr: Cell<Option<u64>>,
     remap_range_start_addr: Cell<Option<u64>>,
+    dwarf_format: Option<Format>,
 }
 
 impl std::fmt::Debug for Remapper<'_> {
@@ -83,20 +86,24 @@ impl<'a> Remapper<'a> {
     pub fn new(
         convert_address: &'a dyn Fn(u64) -> ConvertResult<Address>,
         convert_register: &'a dyn Fn(Register) -> ConvertResult<Register>,
+        dwarf_format: Option<Format>,
     ) -> Self {
         Remapper {
             convert_address,
             convert_register,
             orig_range_start_addr: Cell::new(None),
             remap_range_start_addr: Cell::new(None),
+            dwarf_format,
         }
     }
 
     /// Create a test remapper that does identity mapping
     pub fn test_remapper() -> Self {
-        Self::new(&|address| Ok(Address::Constant(address)), &|register| {
-            Ok(register)
-        })
+        Self::new(
+            &|address| Ok(Address::Constant(address)),
+            &|register| Ok(register),
+            None,
+        )
     }
 
     // Remap and return as u64 or fail (when just the raw address is needed)
@@ -123,6 +130,17 @@ impl<'a> Remapper<'a> {
 }
 
 impl RemapperTr for Remapper<'_> {
+    fn remap_encoding(&self, mut encoding: Encoding) -> ConvertResult<Encoding> {
+        if let Some(format) = self.dwarf_format {
+            encoding.format = format;
+            encoding.address_size = match format {
+                Format::Dwarf32 => 4,
+                Format::Dwarf64 => 8,
+            };
+        }
+        Ok(encoding)
+    }
+
     fn remap_register(&self, orig_register: Register) -> ConvertResult<Register> {
         match (self.convert_register)(orig_register) {
             Ok(reg) => {
@@ -247,7 +265,11 @@ impl RemapperTr for Remapper<'_> {
         orig_length: u64,
     ) -> ConvertResult<(Address, u64)> {
         // Create a new, temporary remapper to avoid messing with the current range
-        let temp_remapper = Remapper::new(self.convert_address, self.convert_register);
+        let temp_remapper = Remapper::new(
+            self.convert_address,
+            self.convert_register,
+            self.dwarf_format,
+        );
         let remapped_start_addr = match temp_remapper.begin_range(orig_start)? {
             Address::Constant(addr) => Ok(addr),
             Address::Symbol { .. } => {
